@@ -9,6 +9,8 @@ import torch
 import torch.nn.functional as F
 from collections import deque
 import random
+import environment
+import wrappers
 
 class DQN(torch.nn.Module):
     def __init__(self, input , hidden, output) -> None:
@@ -41,20 +43,27 @@ class Agent():
     def __init__(self,DEVICE, pretrained=None) -> None:
         self.pretrained = pretrained
         self.DEVICE =  DEVICE
-        if pretrained:
-            self.dqn = torch.load('/home/darthbaba/code/football/agent/saved_model/agent'+self.pretrained+'.pth').to(DEVICE)
-            self.target = torch.load('/home/darthbaba/code/football/agent/saved_model/target'+self.pretrained+'.pth').to(DEVICE)
-            self.dqn.eval()
-            self.target.eval()
-
-        self.dqn = DQN(115, 256, 19).to(DEVICE)
-        self.target = DQN(115,256, 19).to(DEVICE)
-        self.target.load_state_dict(self.dqn.state_dict())
         self.gamma = 0.99
         self.batch_size = 64
         self.eps = 1.0
-        self.optim = torch.optim.Adam(self.dqn.parameters(), lr=0.001)
         self.replay_memory_buffer = deque(maxlen=10000)
+        self.input_size = 172
+        self.hidden_size = 256
+
+        if pretrained:
+            ch = torch.load('/home/darthbaba/code/football/agent/saved_model/agent'+self.pretrained+'.pth')
+            self.dqn = DQN(self.input_size, self.hidden_size, 19).to(DEVICE)
+            self.optim = torch.optim.Adam(self.dqn.parameters(), lr=0.001)
+            self.dqn.load_state_dict(ch['model_state_dict'])
+            self.optim.load_state_dict(ch['optimizer_state_dict'])
+            self.target = torch.load('/home/darthbaba/code/football/agent/saved_model/target'+self.pretrained+'.pth').to(DEVICE)
+            self.dqn.train()
+            self.target.eval()
+        else:
+            self.dqn = DQN(self.input_size, self.hidden_size, 19).to(DEVICE)
+            self.optim = torch.optim.Adam(self.dqn.parameters(), lr=0.001)
+            self.target = DQN(self.input_size,self.hidden_size, 19).to(DEVICE)
+            self.target.load_state_dict(self.dqn.state_dict())
         
     def select_action(self, state):
         p = np.random.random()
@@ -64,7 +73,11 @@ class Agent():
             temp = torch.from_numpy(state).float().unsqueeze(0)
             action_temp = self.dqn(temp.to(self.DEVICE))
             max_q, action = torch.max(action_temp, 1)
-            action = int(action.cpu().numpy())
+            action = action.cpu().numpy()[0]
+            if action == 0:
+                p = np.random.random()
+                if np.random.uniform() < self.eps:
+                    action = np.random.choice(np.arange(1,19))
         return action
 
     def append_replay_buffer(self, s1, a1, r, s2, done):
@@ -76,7 +89,10 @@ class Agent():
             self.eps *= 0.95
 
     def save_agent_and_target(self,num):
-        torch.save(self.dqn, '/home/darthbaba/code/football/agent/saved_model/agent'+num+'.pth')
+        torch.save({
+                    'model_state_dict': self.dqn.state_dict(),
+                    'optimizer_state_dict': self.optim.state_dict()
+                    }, '/home/darthbaba/code/football/agent/saved_model/agent'+num+'.pth')
         torch.save(self.target, '/home/darthbaba/code/football/agent/saved_model/target'+num+'.pth')
 
     # TRAIN LOOP
@@ -113,12 +129,14 @@ class Agent():
 
 DEVICE = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
-agent = Agent(DEVICE,'1')
-env = football_env.create_environment(env_name="11_vs_11_easy_stochastic", stacked=False, representation='simple115v2',rewards="scoring,checkpoints", logdir='/tmp/football', write_goal_dumps=False, 
+agent = Agent(DEVICE)
+env = environment.create_environment(env_name="11_vs_11_easy_stochastic", stacked=False, representation='raw',rewards="scoring,checkpoints", logdir='/tmp/football', write_goal_dumps=False, 
                                     write_full_episode_dumps=False, render=False)
+env = wrappers.Simple115StateWrapper(env)
 
 for i in range(20):
-    s = env.reset()
+    s = np.squeeze(env.reset())
+    print(s.shape)
     steps = 0
     r =  0
     while True:
@@ -127,7 +145,7 @@ for i in range(20):
         steps += 1
         r += rew
         agent.train(s,a,rew,obs, done, steps)
-        s = obs
+        s = np.squeeze(obs)
 
 
         if steps % 100 == 0:
@@ -137,5 +155,6 @@ for i in range(20):
             # agent.save_agent_and_target('1')
             break
 
+    
     print("GAME: %d Steps: %d Reward: %.2f" % (i+1, steps, r))
 agent.save_agent_and_target('1')
